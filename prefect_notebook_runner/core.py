@@ -1,4 +1,8 @@
 import os
+import pickle
+import subprocess
+import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
@@ -8,6 +12,8 @@ from prefect.deployments import Deployment
 from prefect.orion import schemas
 from prefect.settings import PREFECT_API_URL, temporary_settings
 from pydantic import AnyHttpUrl, NonNegativeInt, validate_arguments
+
+from prefect_notebook_runner import module_locator
 
 
 @validate_arguments
@@ -31,20 +37,51 @@ def schedule(
                   https://docs.prefect.io/concepts/schedules/.
         parameters: an optional dictionary of values to pass to the notebook, just like on JupyterHub.
     """
+    my_path = module_locator.module_path()
 
-    with temporary_settings(updates={PREFECT_API_URL: prefect_api_url}):
-        rflow = run_report.with_options(name=name)
+    params = {
+        "token": "deadbeef",
+        "prefect_api_url": prefect_api_url,
+        "name": name,
+        "notebook_url": notebook_url,
+        "queue": queue,
+        "schedule": schedule,
+        "parameters": parameters,
+    }
+
+    with tempfile.NamedTemporaryFile(prefix="prefect-notebook-runner", delete=False) as fb:
+        pickle.dump(params, fb, pickle.HIGHEST_PROTOCOL)
+
+        params_file = fb.name
+
+    print(f"Will run {sys.executable} with {my_path} on {params_file}")
+    output = subprocess.check_output([sys.executable, my_path, params_file])
+    print(f"Output is {output}")
+
+    return output
+
+
+def schedule_notebook(params_path: str) -> Deployment:
+    """This method runs inside the script produced by schedule method."""
+    with open(params_path, "rb") as f:
+        params = pickle.load(f)
+
+    if "token" not in params:
+        raise ValueError("Wrong params passed to this function")
+
+    with temporary_settings(updates={PREFECT_API_URL: params["prefect_api_url"]}):
+        rflow = run_report.with_options(name=params["name"])
         d = Deployment.build_from_flow(
             flow=rflow,
             parameters={
-                "name": name,
-                "notebook_url": notebook_url,
-                "parameters": parameters,  # what we pass to the notebook
+                "name": params["name"],
+                "notebook_url": params["notebook_url"],
+                "parameters": params["parameters"],  # what we pass to the notebook
             },
-            name=name,
-            schedule=schedule,
+            name=params["name"],
+            schedule=params["schedule"],
             version=1,
-            work_queue_name=queue,
+            work_queue_name=params["queue"],
             skip_upload=True,
             apply=True,
             # must have path and entrypoint set to avoid https://github.com/PrefectHQ/prefect/issues/6777
@@ -83,4 +120,4 @@ def run_report(
     logger.info(f"Notebook returned: {body}")
 
 
-__all__ = ["schedule"]
+__all__ = ["schedule", "run_report"]
